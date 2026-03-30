@@ -4,14 +4,16 @@ set -e
 INTERVAL=1
 OUTDIR=""
 WIDTH=1280
-DISPLAY_FLAG=""
+DISPLAY_NUM=""
+REGION_SELECT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -i|--interval) INTERVAL="$2"; shift 2 ;;
         -dir|--directory) OUTDIR="$2"; shift 2 ;;
         -w|--width)    WIDTH="$2";    shift 2 ;;
-        -d|--display)  DISPLAY_FLAG="-D $2"; shift 2 ;;
+        -d|--display)  DISPLAY_NUM="$2"; shift 2 ;;
+        -r|--region)   REGION_SELECT=1; shift ;;
         -h|--help)
             printf "Usage: screenlapse [options]\n\n"
             printf "Options:\n"
@@ -19,12 +21,148 @@ while [[ $# -gt 0 ]]; do
             printf "  -dir, --directory <dir>  Output directory (default: screenlapse_<timestamp>)\n"
             printf "  -w, --width <px>        Output frame width in pixels (default: 1280)\n"
             printf "  -d, --display <n>       Display number to capture (default: current display)\n"
+            printf "  -r, --region            Graphically select a screen region to capture\n"
             printf "  -h, --help              Show this help message\n"
             exit 0
             ;;
         *) printf "Unknown option: %s\nUse -h for help.\n" "$1"; exit 1 ;;
     esac
 done
+
+DISPLAY_FLAG=""
+[ -n "$DISPLAY_NUM" ] && DISPLAY_FLAG="-D $DISPLAY_NUM"
+
+CROP_X=""
+if [ "$REGION_SELECT" = "1" ]; then
+    if ! command -v swiftc &>/dev/null; then
+        printf "Error: swiftc not found. Install Xcode Command Line Tools: xcode-select --install\n"
+        exit 1
+    fi
+    SELECTOR_SRC=$(mktemp /tmp/screenlapse_sel_XXXXXX.swift)
+    SELECTOR_BIN=$(mktemp /tmp/screenlapse_sel_XXXXXX)
+    cat > "$SELECTOR_SRC" <<'SWIFT'
+import Cocoa
+
+class RegionSelector: NSView {
+    var startPoint: NSPoint?
+    var endPoint: NSPoint?
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(white: 0, alpha: 0.2).setFill()
+        bounds.fill()
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: 20, weight: .medium),
+        ]
+        let text = "Click and drag to select a region \u{2022} Escape to cancel"
+        let size = text.size(withAttributes: attrs)
+        let textX = (bounds.width - size.width) / 2
+        let textY = bounds.height - size.height - 50
+        let bgRect = NSRect(x: textX - 16, y: textY - 8, width: size.width + 32, height: size.height + 16)
+        NSColor(white: 0, alpha: 0.5).setFill()
+        NSBezierPath(roundedRect: bgRect, xRadius: 8, yRadius: 8).fill()
+        text.draw(at: NSPoint(x: textX, y: textY), withAttributes: attrs)
+
+        guard let s = startPoint, let e = endPoint else { return }
+        let rect = NSRect(
+            x: min(s.x, e.x), y: min(s.y, e.y),
+            width: abs(e.x - s.x), height: abs(e.y - s.y)
+        )
+        NSColor(white: 1, alpha: 0.08).setFill()
+        rect.fill()
+        NSColor(red: 1, green: 0.25, blue: 0.25, alpha: 1).setStroke()
+        let path = NSBezierPath(rect: rect)
+        path.lineWidth = 2
+        path.stroke()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        startPoint = convert(event.locationInWindow, from: nil)
+        endPoint = startPoint
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        endPoint = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let s = startPoint, let e = endPoint else { return }
+        let rect = NSRect(
+            x: min(s.x, e.x), y: min(s.y, e.y),
+            width: abs(e.x - s.x), height: abs(e.y - s.y)
+        )
+        guard rect.width > 5 && rect.height > 5 else {
+            startPoint = nil; endPoint = nil; needsDisplay = true; return
+        }
+        // flip Y: Cocoa is bottom-left origin, screencapture is top-left
+        let screenH = window!.screen!.frame.height
+        let scale = window!.screen!.backingScaleFactor
+        let x = Int(rect.origin.x)
+        let y = Int(screenH - rect.origin.y - rect.height)
+        print("\(x),\(y),\(Int(rect.width)),\(Int(rect.height)),\(scale)")
+        NSApplication.shared.terminate(nil)
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+
+NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+    if event.keyCode == 53 { NSApplication.shared.terminate(nil) }
+    return event
+}
+NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+    if event.keyCode == 53 { NSApplication.shared.terminate(nil) }
+}
+
+// pick target display: arg 1 is display number (1=main, 2=secondary, etc), empty for main
+let displayNum = CommandLine.arguments.count > 1 ? Int(CommandLine.arguments[1]) ?? 1 : 1
+let screens = NSScreen.screens
+let targetScreen = (displayNum >= 1 && displayNum <= screens.count) ? screens[displayNum - 1] : screens[0]
+
+let screen = targetScreen.frame
+let win = NSWindow(contentRect: screen, styleMask: .borderless, backing: .buffered, defer: false)
+win.level = .floating
+win.backgroundColor = .clear
+win.isOpaque = false
+win.hasShadow = false
+win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+let view = RegionSelector(frame: screen)
+win.contentView = view
+win.makeKeyAndOrderFront(nil)
+win.makeFirstResponder(view)
+
+NSCursor.crosshair.set()
+app.activate(ignoringOtherApps: true)
+app.run()
+SWIFT
+    printf "Compiling region selector..."
+    if ! swiftc -o "$SELECTOR_BIN" "$SELECTOR_SRC" -framework Cocoa; then
+        printf " failed.\nEnsure Xcode Command Line Tools are installed: xcode-select --install\n"
+        rm -f "$SELECTOR_SRC" "$SELECTOR_BIN"
+        exit 1
+    fi
+    printf " done.\nDraw a rectangle on screen to select the capture region.\n"
+    REGION=$("$SELECTOR_BIN" "$DISPLAY_NUM" 2>/dev/null)
+    rm -f "$SELECTOR_SRC" "$SELECTOR_BIN"
+    if [ -z "$REGION" ]; then
+        printf "No region selected. Exiting.\n"
+        exit 1
+    fi
+    IFS=',' read -r RX RY RW RH RSCALE <<< "$REGION"
+    CROP_X=$(printf "%.0f" "$(echo "$RX * $RSCALE" | bc)")
+    CROP_Y=$(printf "%.0f" "$(echo "$RY * $RSCALE" | bc)")
+    CROP_W=$(printf "%.0f" "$(echo "$RW * $RSCALE" | bc)")
+    CROP_H=$(printf "%.0f" "$(echo "$RH * $RSCALE" | bc)")
+    printf "Region: %s,%s,%s,%s\n\n" "$RX" "$RY" "$RW" "$RH"
+fi
 
 OUTDIR="${OUTDIR:-screenlapse_$(date +%Y-%m-%d_%H-%M-%S)}"
 OUTDIR="${OUTDIR/#\~/$HOME}"
@@ -108,10 +246,10 @@ PYEOF
 trap cleanup SIGINT SIGTERM
 
 DISPLAY_MSG=""
-if [ -n "$DISPLAY_FLAG" ]; then
-    DISPLAY_MSG=", display=$(echo $DISPLAY_FLAG | awk '{print $2}')"
-fi
-printf "Capturing every %ss → %s/ (width=%s%s)\nCtrl+C to stop and save\n\n" "$INTERVAL" "$OUTDIR" "$WIDTH" "$DISPLAY_MSG"
+[ -n "$DISPLAY_NUM" ] && DISPLAY_MSG=", display=$DISPLAY_NUM"
+REGION_MSG=""
+[ -n "$CROP_X" ] && REGION_MSG=", region=${RX},${RY},${RW},${RH}"
+printf "Capturing every %ss → %s/ (width=%s%s%s)\nCtrl+C to stop and save\n\n" "$INTERVAL" "$OUTDIR" "$WIDTH" "$DISPLAY_MSG" "$REGION_MSG"
 
 NEXT_MS=$((START))
 
@@ -120,6 +258,14 @@ while true; do
     FRAME=$((FRAME + 1))
     FILENAME=$(printf "frame_%04d_%dms.jpg" "$FRAME" "$ELAPSED")
     screencapture $DISPLAY_FLAG -x -C -t jpg "$TMPDIR/$FILENAME"
+    if [ -n "$CROP_X" ]; then
+        python3 -c "
+from PIL import Image; import sys
+img = Image.open(sys.argv[1])
+x,y,w,h = int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5])
+img.crop((x,y,x+w,y+h)).save(sys.argv[1],'JPEG',quality=95)
+" "$TMPDIR/$FILENAME" "$CROP_X" "$CROP_Y" "$CROP_W" "$CROP_H"
+    fi
     printf "  [%d] +%.1fs\n" "$FRAME" "$(echo "$ELAPSED / 1000" | bc -l)"
 
     NEXT_MS=$(echo "$NEXT_MS + $INTERVAL * 1000" | bc | cut -d. -f1)
