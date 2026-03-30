@@ -1,0 +1,104 @@
+#!/bin/bash
+set -e
+
+INTERVAL="${1:-1}"
+OUTDIR="${2:-screenlapse_$(date +%Y-%m-%d_%H-%M-%S)}"
+OUTDIR="${OUTDIR/#\~/$HOME}"
+WIDTH=1280
+
+TMPDIR=$(mktemp -d)
+FRAME=0
+START=$(gdate +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))")
+
+ms_now() { gdate +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))"; }
+
+cleanup() {
+    if [ "$FRAME" -eq 0 ]; then
+        printf "\nNo frames captured.\n"
+        rm -rf "$TMPDIR"
+        exit 0
+    fi
+
+    printf "\n\nSaving %d frames to %s/..." "$FRAME" "$OUTDIR"
+
+    python3 - "$TMPDIR" "$OUTDIR" "$WIDTH" <<'PYEOF'
+import sys, os, glob
+from PIL import Image, ImageDraw, ImageFont
+
+tmpdir, outdir, target_w = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+LABEL_H = 32
+LABEL_BG = (30, 30, 30)
+FG = (200, 200, 200)
+
+os.makedirs(outdir, exist_ok=True)
+
+try:
+    font = ImageFont.truetype("/System/Library/Fonts/SFCompact.ttf", 18)
+except Exception:
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
+    except Exception:
+        font = ImageFont.load_default()
+
+frames = sorted(glob.glob(os.path.join(tmpdir, "frame_*.*")))
+if not frames:
+    print(" no frames found.")
+    sys.exit(1)
+
+total_size = 0
+for i, f in enumerate(frames):
+    img = Image.open(f)
+    if img.size[0] != target_w:
+        ratio = target_w / img.size[0]
+        img = img.resize((target_w, int(img.size[1] * ratio)), Image.LANCZOS)
+
+    frame_w, frame_h = img.size
+
+    # parse elapsed time from filename
+    base = os.path.splitext(os.path.basename(f))[0]
+    parts = base.split("_")
+    elapsed = parts[-1].rstrip("ms") if len(parts) >= 3 else "?"
+    elapsed_f = int(elapsed) / 1000 if elapsed.isdigit() else elapsed
+
+    # create image with label bar on top
+    out_img = Image.new("RGB", (frame_w, LABEL_H + frame_h), LABEL_BG)
+    draw = ImageDraw.Draw(out_img)
+
+    label = f"  Frame {i+1}  —  +{elapsed_f}s"
+    draw.text((6, 6), label, fill=FG, font=font)
+
+    out_img.paste(img, (0, LABEL_H))
+
+    out_path = os.path.join(outdir, f"frame_{i+1:03d}_{elapsed_f}s.jpg")
+    out_img.save(out_path, "JPEG", quality=90)
+    total_size += os.path.getsize(out_path)
+
+mb = total_size / (1024 * 1024)
+print(f" saved {len(frames)} frames to {outdir}/ ({mb:.1f}MB total)")
+PYEOF
+
+    rm -rf "$TMPDIR"
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+printf "Capturing every %ss → %s/ (width=%s)\nCtrl+C to stop and save\n\n" "$INTERVAL" "$OUTDIR" "$WIDTH"
+
+NEXT_MS=$((START))
+
+while true; do
+    ELAPSED=$(($(ms_now) - START))
+    FRAME=$((FRAME + 1))
+    FILENAME=$(printf "frame_%04d_%dms.jpg" "$FRAME" "$ELAPSED")
+    screencapture -x -C -t jpg "$TMPDIR/$FILENAME"
+    printf "  [%d] +%.1fs\n" "$FRAME" "$(echo "$ELAPSED / 1000" | bc -l)"
+
+    NEXT_MS=$(echo "$NEXT_MS + $INTERVAL * 1000" | bc | cut -d. -f1)
+    NOW=$(ms_now)
+    REMAIN=$((NEXT_MS - NOW))
+    if [ "$REMAIN" -gt 0 ]; then
+        sleep "$(echo "scale=3; $REMAIN / 1000" | bc)"
+    fi
+done
