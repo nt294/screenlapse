@@ -1,10 +1,33 @@
 #!/bin/bash
 set -e
 
-INTERVAL="${1:-1}"
-OUTDIR="${2:-screenlapse_$(date +%Y-%m-%d_%H-%M-%S)}"
-OUTDIR="${OUTDIR/#\~/$HOME}"
+INTERVAL=1
+OUTDIR=""
 WIDTH=1280
+DISPLAY_FLAG=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--interval) INTERVAL="$2"; shift 2 ;;
+        -dir|--directory) OUTDIR="$2"; shift 2 ;;
+        -w|--width)    WIDTH="$2";    shift 2 ;;
+        -d|--display)  DISPLAY_FLAG="-D $2"; shift 2 ;;
+        -h|--help)
+            printf "Usage: screenlapse [options]\n\n"
+            printf "Options:\n"
+            printf "  -i, --interval <secs>   Capture interval in seconds (default: 1)\n"
+            printf "  -dir, --directory <dir>  Output directory (default: screenlapse_<timestamp>)\n"
+            printf "  -w, --width <px>        Output frame width in pixels (default: 1280)\n"
+            printf "  -d, --display <n>       Display number to capture (default: current display)\n"
+            printf "  -h, --help              Show this help message\n"
+            exit 0
+            ;;
+        *) printf "Unknown option: %s\nUse -h for help.\n" "$1"; exit 1 ;;
+    esac
+done
+
+OUTDIR="${OUTDIR:-screenlapse_$(date +%Y-%m-%d_%H-%M-%S)}"
+OUTDIR="${OUTDIR/#\~/$HOME}"
 
 TMPDIR=$(mktemp -d)
 FRAME=0
@@ -84,7 +107,11 @@ PYEOF
 
 trap cleanup SIGINT SIGTERM
 
-printf "Capturing every %ss → %s/ (width=%s)\nCtrl+C to stop and save\n\n" "$INTERVAL" "$OUTDIR" "$WIDTH"
+DISPLAY_MSG=""
+if [ -n "$DISPLAY_FLAG" ]; then
+    DISPLAY_MSG=", display=$(echo $DISPLAY_FLAG | awk '{print $2}')"
+fi
+printf "Capturing every %ss → %s/ (width=%s%s)\nCtrl+C to stop and save\n\n" "$INTERVAL" "$OUTDIR" "$WIDTH" "$DISPLAY_MSG"
 
 NEXT_MS=$((START))
 
@@ -92,7 +119,7 @@ while true; do
     ELAPSED=$(($(ms_now) - START))
     FRAME=$((FRAME + 1))
     FILENAME=$(printf "frame_%04d_%dms.jpg" "$FRAME" "$ELAPSED")
-    screencapture -x -C -t jpg "$TMPDIR/$FILENAME"
+    screencapture $DISPLAY_FLAG -x -C -t jpg "$TMPDIR/$FILENAME"
     printf "  [%d] +%.1fs\n" "$FRAME" "$(echo "$ELAPSED / 1000" | bc -l)"
 
     NEXT_MS=$(echo "$NEXT_MS + $INTERVAL * 1000" | bc | cut -d. -f1)

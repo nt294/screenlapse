@@ -5,11 +5,16 @@ A macOS command-line tool that captures screenshots at a set interval and saves 
 ## Usage
 
 ```
-screenlapse [interval] [output_dir]
+screenlapse [options]
 ```
 
-- `interval` — seconds between captures (default: `1`)
-- `output_dir` — output directory (default: `screenlapse_YYYY-MM-DD_HH-MM-SS`)
+| Flag | Long form | Description | Default |
+|------|-----------|-------------|---------|
+| `-i` | `--interval` | Capture interval in seconds | `1` |
+| `-dir` | `--directory` | Output directory | `screenlapse_<timestamp>` |
+| `-w` | `--width` | Output frame width in pixels | `1280` |
+| `-d` | `--display` | Display number to capture | current display |
+| `-h` | `--help` | Show help message | |
 
 ## Examples
 
@@ -18,10 +23,16 @@ screenlapse [interval] [output_dir]
 screenlapse
 
 # Capture every 0.25 seconds
-screenlapse 0.25
+screenlapse -i 0.25
 
 # Capture every 2 seconds to a specific directory
-screenlapse 2 ~/my_captures
+screenlapse -i 2 -dir ~/my_captures
+
+# Capture from display 2 at 5 second intervals
+screenlapse -d 2 -i 5
+
+# Capture at a wider resolution
+screenlapse -w 1920 -dir ~/hires_captures
 ```
 
 ## Requirements
